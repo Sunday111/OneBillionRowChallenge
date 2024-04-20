@@ -1,0 +1,3 @@
+[submodule "deps/sunday_cmake_presets"]
+	path = deps/sunday_cmake_presets
+	url = https://github.com/Sunday111/sunday_cmake_presets
