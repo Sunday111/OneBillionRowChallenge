@@ -1,3 +1,6 @@
 [submodule "deps/sunday_cmake_presets"]
 	path = deps/sunday_cmake_presets
 	url = https://github.com/Sunday111/sunday_cmake_presets
+[submodule "deps/unordered_dense"]
+	path = deps/unordered_dense
+	url = https://github.com/martinus/unordered_dense
