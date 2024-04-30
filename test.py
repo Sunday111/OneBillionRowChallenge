@@ -14,6 +14,7 @@ def read_file(path: Path) -> str:
 
 
 def run_and_compare(suffix: str):
+    start_time = time.time()
     finished_process = subprocess.run(
         check=True,
         args=[
@@ -22,11 +23,14 @@ def run_and_compare(suffix: str):
         ],
         capture_output=True,
     )
+    end_time = time.time()
 
     result_str = finished_process.stdout.decode("utf-8")
     expected_str = read_file(DATA_DIR / f"baseline_{suffix}.txt")
 
-    if expected_str != result_str:
+    if expected_str == result_str:
+        print(f"Test ran in {end_time - start_time}s, result is valid")
+    else:
         raise RuntimeError("Wrong results!")
 
     durations: list[float] = []
