@@ -8,10 +8,10 @@
 #include "bit_scan.h"
 #include "file_utils.hpp"
 #include "measure_time.hpp"
-#include "parse_uint.hpp"
 
 constexpr bool kWithDiagnosticInfo = false;
 constexpr std::optional<size_t> kOverrideThreadsCount = std::nullopt;
+// constexpr std::optional<size_t> kOverrideThreadsCount = 1;
 
 class StationStats
 {
@@ -131,7 +131,7 @@ int main([[maybe_unused]] const int argc, char** argv)
                                         data_begin = file_data.data() + begin,
                                         data_end = file_data.begin() + end]()
                 {
-                    DeclareAffinity(thread_index + 1);
+                    DeclareAffinity(thread_index);
                     auto pos = data_begin;
 
                     const auto align_offset = std::bit_cast<size_t>(data_begin) % SymbolScanner::kAlignment;
@@ -156,17 +156,16 @@ int main([[maybe_unused]] const int argc, char** argv)
 
                         const bool negative = *pos == '-';
                         pos = negative ? pos + 1 : pos;
-                        auto dot = lb - 2;
-                        auto value = static_cast<int16_t>(ParseUint(pos, static_cast<size_t>(dot - pos)));
-                        value *= 10;
-                        value += static_cast<int16_t>(*(lb - 1) - '0');  // NOLINT
+
+                        const int value =
+                            ((lb[-1] - '0') + (lb[-3] - '0') * 10 + (lb[-4] - '0') * 100 * (lb - pos == 4)) *
+                            (negative ? -1 : 1);
 
                         pos = lb;
-                        return negative ? -value : value;  // NOLINT
+                        return static_cast<int16_t>(value);  // NOLINT
                     };
 
-                    auto& name_to_stats = threads_stats[thread_index];
-                    name_to_stats.reserve(1024);
+                    StationsMap name_to_stats(1024);
                     while (pos != data_end)
                     {
                         auto name = read_name();
@@ -181,6 +180,8 @@ int main([[maybe_unused]] const int argc, char** argv)
                         stats.count++;
                         stats.sum += value;
                     }
+
+                    threads_stats[thread_index] = std::move(name_to_stats);
                 };
 
                 // No need to spawn a new thread for the last chunk - going to wait for all of them anyway
@@ -213,32 +214,41 @@ int main([[maybe_unused]] const int argc, char** argv)
 
     // Print merged data
     std::vector<StationsIterator> sorted_stats;
-    sorted_stats.reserve(name_to_stats.size());
-    for (auto it = name_to_stats.begin(); it != name_to_stats.end(); ++it)
-    {
-        sorted_stats.emplace_back(it);
-    }
 
-    std::ranges::sort(
-        sorted_stats,
-        [](const StationsIterator& a, const StationsIterator& b)
+    const auto sorting_duration = MeasureDuration(
+        [&]()
         {
-            return a->first < b->first;
+            sorted_stats.reserve(name_to_stats.size());
+            for (auto it = name_to_stats.begin(); it != name_to_stats.end(); ++it)
+            {
+                sorted_stats.emplace_back(it);
+            }
+
+            std::ranges::sort(
+                sorted_stats,
+                [](const StationsIterator& a, const StationsIterator& b)
+                {
+                    return a->first < b->first;
+                });
         });
 
-    std::print("{{");
-    for (size_t i = 0; i != sorted_stats.size(); ++i)
-    {
-        if (i != 0) std::print(", ");
-        const auto& [name, stats] = *sorted_stats[i];
-        std::print(
-            "{}={:.1f}/{:.1f}/{:.1f}",
-            name,
-            stats.Min(),
-            std::round(stats.Average() * 10.0) / 10.0,
-            stats.Max());
-    }
-    std::println("}}");
+    const auto printing_duration = MeasureDuration(
+        [&]
+        {
+            std::print("{{");
+            for (size_t i = 0; i != sorted_stats.size(); ++i)
+            {
+                if (i != 0) std::print(", ");
+                const auto& [name, stats] = *sorted_stats[i];
+                std::print(
+                    "{}={:.1f}/{:.1f}/{:.1f}",
+                    name,
+                    stats.Min(),
+                    std::round(stats.Average() * 10.0) / 10.0,
+                    stats.Max());
+            }
+            std::println("}}");
+        });
 
     if constexpr (kWithDiagnosticInfo)
     {
@@ -247,6 +257,8 @@ int main([[maybe_unused]] const int argc, char** argv)
 
         std::println("File read time: {}", file_read_time);
         std::println("Merge time: {}", merge_duration);
+        std::println("Sorting time: {}", sorting_duration);
+        std::println("Printing duration: {}", printing_duration);
         std::println("Max string: {}", *max_string);
         std::println("Max string length: {}", (*max_string).size());
     }

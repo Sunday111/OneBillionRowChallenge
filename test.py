@@ -42,13 +42,13 @@ def run_and_compare(suffix: str):
                 BIN_DIR / "obrc",
                 DATA_DIR / f"measurements_{suffix}.txt",
             ],
-            capture_output=True,
+            capture_output=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         end_time = time.time()
         durations.append(end_time - start_time)
 
-    del durations[0]
-    del durations[-1]
     print(f"Avg time: {sum(durations) / len(durations)}")
     print(f"Min time: {min(durations)}")
     print(f"Max time: {max(durations)}")

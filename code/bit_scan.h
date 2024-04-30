@@ -67,7 +67,7 @@ class SymbolScanner256
 {
 public:
     using SimdType = __m256i;
-    using MaskType = uint64_t;
+    using MaskType = uint32_t;
     static constexpr size_t kAlignment = alignof(SimdType);
 
     explicit SymbolScanner256(const char* pos, size_t offset, const char symbol)
