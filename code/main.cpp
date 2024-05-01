@@ -11,7 +11,7 @@
 
 constexpr bool kWithDiagnosticInfo = false;
 constexpr std::optional<size_t> kOverrideThreadsCount = std::nullopt;
-// constexpr std::optional<size_t> kOverrideThreadsCount = 1;
+// constexpr std::optional<size_t> kOverrideThreadsCount = 24;
 
 class StationStats
 {
@@ -55,6 +55,42 @@ void DeclareAffinity(size_t thread_index)
     assert(r == 0);
 }
 
+struct ThreadMeaasurements
+{
+    auto Duration() const
+    {
+        return end_time - start_time;
+    }
+
+    std::chrono::milliseconds DurationMs() const
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(Duration());
+    }
+
+    double DurationDbl() const
+    {
+        return static_cast<double>(DurationMs().count());
+    }
+
+    static auto Now()
+    {
+        return std::chrono::high_resolution_clock::now();
+    }
+
+    void RecordStartTime()
+    {
+        start_time = Now();
+    }
+
+    void RecordEndTime()
+    {
+        end_time = Now();
+    }
+
+    std::chrono::high_resolution_clock::time_point start_time;
+    std::chrono::high_resolution_clock::time_point end_time;
+};
+
 int main([[maybe_unused]] const int argc, char** argv)
 {
     if (argc < 2)
@@ -91,12 +127,18 @@ int main([[maybe_unused]] const int argc, char** argv)
 
     StationsMap name_to_stats{};
     std::vector<StationsMap> threads_stats;
+    std::vector<ThreadMeaasurements> threads_measurements;
     const auto file_read_time = MeasureDuration(
         [&]
         {
             const size_t threads_count = kOverrideThreadsCount.value_or(std::thread::hardware_concurrency());
 
             threads_stats.resize(threads_count);
+            if constexpr (kWithDiagnosticInfo)
+            {
+                threads_measurements.resize(threads_count);
+            }
+
             std::vector<std::jthread> threads;
             threads.reserve(threads_count);
 
@@ -117,7 +159,7 @@ int main([[maybe_unused]] const int argc, char** argv)
                     const size_t threads_remaining = threads_count - thread_index;
                     const size_t bytes_remaining = file_data.size() - previous_end_pos;
                     const auto bytes_per_thread =
-                        static_cast<size_t>(static_cast<double>(bytes_remaining / threads_remaining) * 1.001);
+                        static_cast<size_t>(static_cast<double>(bytes_remaining / threads_remaining) * 1.0);
                     end = begin + bytes_per_thread;
                     auto it = std::find(&file_data[end], &file_data.back(), '\n');
                     assert(it != file_data.end());
@@ -126,11 +168,15 @@ int main([[maybe_unused]] const int argc, char** argv)
 
                 previous_end_pos = end;
 
-                const auto thread_fn = [&threads_stats,
+                const auto thread_fn = [&threads_measurements,
+                                        &threads_stats,
                                         thread_index,
                                         data_begin = file_data.data() + begin,
                                         data_end = file_data.begin() + end]()
                 {
+                    [[maybe_unused]] const auto& tm = threads_measurements;  // unused var warning...
+                    if constexpr (kWithDiagnosticInfo) threads_measurements[thread_index].RecordStartTime();
+
                     DeclareAffinity(thread_index);
                     auto pos = data_begin;
 
@@ -182,6 +228,7 @@ int main([[maybe_unused]] const int argc, char** argv)
                     }
 
                     threads_stats[thread_index] = std::move(name_to_stats);
+                    if constexpr (kWithDiagnosticInfo) threads_measurements[thread_index].RecordEndTime();
                 };
 
                 // No need to spawn a new thread for the last chunk - going to wait for all of them anyway
@@ -252,6 +299,7 @@ int main([[maybe_unused]] const int argc, char** argv)
 
     if constexpr (kWithDiagnosticInfo)
     {
+        using namespace std::literals;
         const auto max_string =
             std::ranges::max_element(std::views::keys(name_to_stats), std::less<>{}, &std::string_view::size);
 
@@ -261,6 +309,28 @@ int main([[maybe_unused]] const int argc, char** argv)
         std::println("Printing duration: {}", printing_duration);
         std::println("Max string: {}", *max_string);
         std::println("Max string length: {}", (*max_string).size());
+
+        std::println("Threads durations: ");
+        for (size_t thread_index = 0; thread_index != threads_measurements.size(); ++thread_index)
+        {
+            std::println("   {}: {}", thread_index, threads_measurements[thread_index].DurationMs());
+        }
+        std::println(
+            "   min: {}",
+            (*std::ranges::min_element(threads_measurements, std::less<>{}, &ThreadMeaasurements::DurationMs))
+                .DurationMs());
+
+        std::println(
+            "   avg: {}",
+            std::ranges::fold_left(
+                std::views::transform(threads_measurements, &ThreadMeaasurements::DurationDbl),
+                0.0,
+                std::plus<>{}) /
+                static_cast<double>(threads_measurements.size()));
+        std::println(
+            "   max: {}",
+            (*std::ranges::max_element(threads_measurements, std::less<>{}, &ThreadMeaasurements::DurationMs))
+                .DurationMs());
     }
 
     return 0;
