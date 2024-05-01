@@ -11,7 +11,7 @@
 
 constexpr bool kWithDiagnosticInfo = false;
 constexpr std::optional<size_t> kOverrideThreadsCount = std::nullopt;
-// constexpr std::optional<size_t> kOverrideThreadsCount = 24;
+// constexpr std::optional<size_t> kOverrideThreadsCount = 1;
 
 class StationStats
 {
@@ -54,6 +54,51 @@ void DeclareAffinity(size_t thread_index)
     [[maybe_unused]] auto r = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     assert(r == 0);
 }
+
+class DataSlicer
+{
+public:
+    explicit DataSlicer(std::string_view data)
+    {
+        constexpr size_t max_chunk_size = 67108864;  // 2 ^ 26
+        size_t previous_end_pos = 0;
+        while (previous_end_pos != data.size())
+        {
+            const size_t begin = previous_end_pos;
+            const size_t bytes_remaining = data.size() - begin;
+            const auto chunk_size = std::min(bytes_remaining, max_chunk_size);
+
+            size_t end = data.size();
+            if (begin + chunk_size < data.size())
+            {
+                end = begin + chunk_size;
+                auto it = std::find(&data[end], &data.back(), '\n');
+                assert(it != data.end());
+                end = static_cast<size_t>(it - data.begin()) + 1;
+            }
+
+            chunks_.push_back(std::string_view(data.data() + begin, data.data() + end));
+            previous_end_pos = end;
+        }
+    }
+
+    std::optional<std::string_view> GetChunk()
+    {
+        auto i = index_.fetch_add(1);
+
+        // if (i == 10) abort();
+
+        [[unlikely]] if (i >= chunks_.size())
+        {
+            return std::nullopt;
+        }
+
+        return chunks_[i];
+    }
+
+    std::vector<std::string_view> chunks_;
+    std::atomic<size_t> index_ = 0;
+};
 
 struct ThreadMeaasurements
 {
@@ -122,12 +167,19 @@ int main([[maybe_unused]] const int argc, char** argv)
     const std::string_view file_data = read_file_result.value().GetData();
     assert((reinterpret_cast<size_t>(file_data.data())) % 64 == 0);
 
+    DataSlicer slicer(file_data);
+
+    struct
+    {
+        std::mutex log_lock{};
+        std::vector<ThreadMeaasurements> threads_measurements;
+    } threads_shared_data{};
+
     using StationsMap = ankerl::unordered_dense::map<std::string_view, StationStats>;
     using StationsIterator = StationsMap::iterator;
 
     StationsMap name_to_stats{};
     std::vector<StationsMap> threads_stats;
-    std::vector<ThreadMeaasurements> threads_measurements;
     const auto file_read_time = MeasureDuration(
         [&]
         {
@@ -136,104 +188,97 @@ int main([[maybe_unused]] const int argc, char** argv)
             threads_stats.resize(threads_count);
             if constexpr (kWithDiagnosticInfo)
             {
-                threads_measurements.resize(threads_count);
+                threads_shared_data.threads_measurements.resize(threads_count);
             }
 
             std::vector<std::jthread> threads;
             threads.reserve(threads_count);
 
-            size_t previous_end_pos = 0;
             for (size_t thread_index : std::views::iota(0UZ, threads_count))
             {
-                const bool is_last_chunk = thread_index == threads_count - 1;
-                size_t begin = previous_end_pos;
-                size_t end = 0;
-
-                // The last thread takes remaining data
-                if (is_last_chunk)
+                const auto thread_fn = [&threads_shared_data, &threads_stats, thread_index, &slicer]()
                 {
-                    end = file_data.size();
-                }
-                else
-                {
-                    const size_t threads_remaining = threads_count - thread_index;
-                    const size_t bytes_remaining = file_data.size() - previous_end_pos;
-                    const auto bytes_per_thread =
-                        static_cast<size_t>(static_cast<double>(bytes_remaining / threads_remaining) * 1.0);
-                    end = begin + bytes_per_thread;
-                    auto it = std::find(&file_data[end], &file_data.back(), '\n');
-                    assert(it != file_data.end());
-                    end = static_cast<size_t>(it - &file_data.front()) + 1;
-                }
-
-                previous_end_pos = end;
-
-                const auto thread_fn = [&threads_measurements,
-                                        &threads_stats,
-                                        thread_index,
-                                        data_begin = file_data.data() + begin,
-                                        data_end = file_data.begin() + end]()
-                {
-                    [[maybe_unused]] const auto& tm = threads_measurements;  // unused var warning...
-                    if constexpr (kWithDiagnosticInfo) threads_measurements[thread_index].RecordStartTime();
-
-                    DeclareAffinity(thread_index);
-                    auto pos = data_begin;
-
-                    const auto align_offset = std::bit_cast<size_t>(data_begin) % SymbolScanner::kAlignment;
-                    const auto align_pos = pos - align_offset;
-                    SymbolScanner semicolon_scanner(align_pos, align_offset, ';');
-                    SymbolScanner line_br_scanner(align_pos, align_offset, '\n');
-
-                    auto read_name = [&]() -> std::string_view
+                    [[maybe_unused]] const auto& tm = threads_shared_data;  // unused var warning...
+                    if constexpr (kWithDiagnosticInfo)
                     {
-                        auto start = pos;
-                        auto it = semicolon_scanner.GetNext();
-                        assert(it > start);
-                        assert(it != data_end);
-                        pos = it + 1;
-                        return std::string_view(start, it);
-                    };
-
-                    auto read_value = [&]() -> int16_t
-                    {
-                        const auto lb = line_br_scanner.GetNext();
-                        assert(*lb == '\n');
-
-                        const bool negative = *pos == '-';
-                        pos = negative ? pos + 1 : pos;
-
-                        const int value =
-                            ((lb[-1] - '0') + (lb[-3] - '0') * 10 + (lb[-4] - '0') * 100 * (lb - pos == 4)) *
-                            (negative ? -1 : 1);
-
-                        pos = lb;
-                        return static_cast<int16_t>(value);  // NOLINT
-                    };
-
-                    StationsMap name_to_stats(1024);
-                    while (pos != data_end)
-                    {
-                        auto name = read_name();
-                        StationStats& stats = name_to_stats[name];
-
-                        const auto value = read_value();
-                        assert(*pos == '\n');
-                        ++pos;
-
-                        stats.min = std::min(stats.min, value);
-                        stats.max = std::max(stats.max, value);
-                        stats.count++;
-                        stats.sum += value;
+                        threads_shared_data.threads_measurements[thread_index].RecordStartTime();
                     }
 
+                    StationsMap name_to_stats(1400);
+                    while (const auto opt_chunk = slicer.GetChunk())
+                    {
+                        const auto& chunk = opt_chunk.value();
+
+                        if constexpr (kWithDiagnosticInfo)
+                        {
+                            std::scoped_lock sl{threads_shared_data.log_lock};
+                            std::println(
+                                "Thread {} took chunk [{:#x}; {:#x}). {} bytes",
+                                thread_index,
+                                std::bit_cast<size_t>(chunk.begin()),
+                                std::bit_cast<size_t>(chunk.end()),
+                                chunk.size());
+                        }
+
+                        DeclareAffinity(thread_index);
+                        auto pos = chunk.data();
+
+                        const auto align_offset = std::bit_cast<size_t>(pos) % SymbolScanner::kAlignment;
+                        const auto align_pos = pos - align_offset;
+                        SymbolScanner semicolon_scanner(align_pos, align_offset, ';');
+                        SymbolScanner line_br_scanner(align_pos, align_offset, '\n');
+
+                        auto read_name = [&]() -> std::string_view
+                        {
+                            auto start = pos;
+                            auto it = semicolon_scanner.GetNext();
+                            assert(it > start);
+                            assert(it != chunk.end());
+                            pos = it + 1;
+                            return std::string_view(start, it);
+                        };
+
+                        auto read_value = [&]() -> int16_t
+                        {
+                            const auto lb = line_br_scanner.GetNext();
+                            assert(*lb == '\n');
+
+                            const bool negative = *pos == '-';
+                            pos = negative ? pos + 1 : pos;
+
+                            const int value =
+                                ((lb[-1] - '0') + (lb[-3] - '0') * 10 + (lb[-4] - '0') * 100 * (lb - pos == 4)) *
+                                (negative ? -1 : 1);
+
+                            pos = lb;
+                            return static_cast<int16_t>(value);  // NOLINT
+                        };
+
+                        while (pos != chunk.end())
+                        {
+                            auto name = read_name();
+                            StationStats& stats = name_to_stats[name];
+
+                            const auto value = read_value();
+                            assert(*pos == '\n');
+                            ++pos;
+
+                            stats.min = std::min(stats.min, value);
+                            stats.max = std::max(stats.max, value);
+                            stats.count++;
+                            stats.sum += value;
+                        }
+                    }
                     threads_stats[thread_index] = std::move(name_to_stats);
-                    if constexpr (kWithDiagnosticInfo) threads_measurements[thread_index].RecordEndTime();
+                    if constexpr (kWithDiagnosticInfo)
+                    {
+                        threads_shared_data.threads_measurements[thread_index].RecordEndTime();
+                    }
                 };
 
                 // No need to spawn a new thread for the last chunk - going to wait for all of them anyway
                 // so this thread can be reused
-                if (is_last_chunk)
+                if (thread_index == threads_count - 1)
                 {
                     thread_fn();
                 }
@@ -311,25 +356,34 @@ int main([[maybe_unused]] const int argc, char** argv)
         std::println("Max string length: {}", (*max_string).size());
 
         std::println("Threads durations: ");
-        for (size_t thread_index = 0; thread_index != threads_measurements.size(); ++thread_index)
+        for (size_t thread_index = 0; thread_index != threads_shared_data.threads_measurements.size(); ++thread_index)
         {
-            std::println("   {}: {}", thread_index, threads_measurements[thread_index].DurationMs());
+            std::println(
+                "   {}: {}",
+                thread_index,
+                threads_shared_data.threads_measurements[thread_index].DurationMs());
         }
         std::println(
             "   min: {}",
-            (*std::ranges::min_element(threads_measurements, std::less<>{}, &ThreadMeaasurements::DurationMs))
+            (*std::ranges::min_element(
+                 threads_shared_data.threads_measurements,
+                 std::less<>{},
+                 &ThreadMeaasurements::DurationMs))
                 .DurationMs());
 
         std::println(
             "   avg: {}",
             std::ranges::fold_left(
-                std::views::transform(threads_measurements, &ThreadMeaasurements::DurationDbl),
+                std::views::transform(threads_shared_data.threads_measurements, &ThreadMeaasurements::DurationDbl),
                 0.0,
                 std::plus<>{}) /
-                static_cast<double>(threads_measurements.size()));
+                static_cast<double>(threads_shared_data.threads_measurements.size()));
         std::println(
             "   max: {}",
-            (*std::ranges::max_element(threads_measurements, std::less<>{}, &ThreadMeaasurements::DurationMs))
+            (*std::ranges::max_element(
+                 threads_shared_data.threads_measurements,
+                 std::less<>{},
+                 &ThreadMeaasurements::DurationMs))
                 .DurationMs());
     }
 
