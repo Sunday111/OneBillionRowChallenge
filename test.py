@@ -13,6 +13,34 @@ def read_file(path: Path) -> str:
         return file.read()
 
 
+def run_and_measure_use_time(suffix: str) -> float:
+    obrc_path = (BIN_DIR / "obrc").as_posix()
+    file_path = (DATA_DIR / f"measurements_{suffix}.txt").as_posix()
+
+    result = subprocess.run(
+        check=True,
+        args=f"/usr/bin/time -f '%e' {obrc_path} {file_path} > /dev/null",
+        shell=True,
+        capture_output=True,
+    )
+
+    return float(result.stderr.decode("utf-8"))
+
+
+def run_and_measure(suffix: str) -> float:
+    obrc_path = (BIN_DIR / "obrc").as_posix()
+    file_path = (DATA_DIR / f"measurements_{suffix}.txt").as_posix()
+
+    start = time.time()
+    result = subprocess.run(
+        check=True,
+        args=[obrc_path, file_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return time.time() - start
+
+
 def run_and_compare(suffix: str):
     start_time = time.time()
     finished_process = subprocess.run(
@@ -34,20 +62,8 @@ def run_and_compare(suffix: str):
         raise RuntimeError("Wrong results!")
 
     durations: list[float] = []
-    for _ in range(30):
-        start_time = time.time()
-        subprocess.run(
-            check=True,
-            args=[
-                BIN_DIR / "obrc",
-                DATA_DIR / f"measurements_{suffix}.txt",
-            ],
-            capture_output=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        end_time = time.time()
-        durations.append(end_time - start_time)
+    for _ in range(5):
+        durations.append(run_and_measure(suffix))
 
     print(f"Avg time: {sum(durations) / len(durations)}")
     print(f"Min time: {min(durations)}")

@@ -58,10 +58,28 @@ void DeclareAffinity(size_t thread_index)
 class DataSlicer
 {
 public:
-    explicit DataSlicer(std::string_view data)
+    explicit DataSlicer(const std::string_view data, const size_t consumers_count)
     {
-        constexpr size_t max_chunk_size = 67108864;  // 2 ^ 26
+        // First part of the file be processed in big chunks
         size_t previous_end_pos = 0;
+        {
+            const size_t chunk_size = static_cast<size_t>(static_cast<double>(data.size()) * 0.9) / consumers_count;
+            for (size_t i = 0; i != consumers_count; ++i)
+            {
+                const size_t begin = previous_end_pos;
+
+                size_t end = begin + chunk_size;
+                auto it = std::find(&data[end], &data.back(), '\n');
+                assert(it != data.end());
+                end = static_cast<size_t>(it - data.begin()) + 1;
+
+                chunks_.push_back(std::string_view(data.data() + begin, data.data() + end));
+                previous_end_pos = end;
+            }
+        }
+
+        constexpr size_t max_chunk_size = 1 << 22;
+        chunks_.reserve((data.size() / max_chunk_size) + 1);
         while (previous_end_pos != data.size())
         {
             const size_t begin = previous_end_pos;
@@ -167,7 +185,8 @@ int main([[maybe_unused]] const int argc, char** argv)
     const std::string_view file_data = read_file_result.value().GetData();
     assert((reinterpret_cast<size_t>(file_data.data())) % 64 == 0);
 
-    DataSlicer slicer(file_data);
+    const size_t threads_count = kOverrideThreadsCount.value_or(std::thread::hardware_concurrency());
+    DataSlicer slicer(file_data, threads_count);
 
     struct
     {
@@ -183,8 +202,6 @@ int main([[maybe_unused]] const int argc, char** argv)
     const auto file_read_time = MeasureDuration(
         [&]
         {
-            const size_t threads_count = kOverrideThreadsCount.value_or(std::thread::hardware_concurrency());
-
             threads_stats.resize(threads_count);
             if constexpr (kWithDiagnosticInfo)
             {

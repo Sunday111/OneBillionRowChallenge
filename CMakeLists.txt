@@ -26,4 +26,4 @@ file(GLOB_RECURSE target_sources RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_
 add_executable(${target_name} ${target_sources})
 set_generic_compile_options(${target_name} PUBLIC)
 target_link_libraries(${target_name} unordered_dense::unordered_dense)
-target_compile_options(${target_name} PRIVATE "-fno-rtti;-fno-exceptions;-march=native")
+target_compile_options(${target_name} PRIVATE "-fno-rtti;-fno-exceptions;-march=native;-mtune=native;-Ofast")
