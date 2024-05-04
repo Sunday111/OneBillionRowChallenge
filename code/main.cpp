@@ -26,9 +26,9 @@ public:
         return static_cast<double>(max) / 10;
     }
 
-    double Average() const
+    float Average() const
     {
-        return static_cast<double>(sum) / (static_cast<double>(count) * 10);
+        return round(static_cast<float>(sum) / static_cast<float>(count)) * 0.1f;
     }
 
     void MergeFrom(const StationStats& other)
@@ -60,7 +60,7 @@ class DataSlicer
 public:
     explicit DataSlicer(const std::string_view data, const size_t consumers_count)
     {
-        // First part of the file be processed in big chunks
+        // First part of the file will be processed in big chunks
         size_t previous_end_pos = 0;
         {
             const size_t chunk_size = static_cast<size_t>(static_cast<double>(data.size()) * 0.9) / consumers_count;
@@ -78,8 +78,8 @@ public:
             }
         }
 
-        constexpr size_t max_chunk_size = 1 << 22;
-        chunks_.reserve((data.size() / max_chunk_size) + 1);
+        constexpr size_t max_chunk_size = 1 << 21;
+        chunks_.reserve(((data.size() - previous_end_pos) / max_chunk_size) + 1);
         while (previous_end_pos != data.size())
         {
             const size_t begin = previous_end_pos;
@@ -103,8 +103,6 @@ public:
     std::optional<std::string_view> GetChunk()
     {
         auto i = index_.fetch_add(1);
-
-        // if (i == 10) abort();
 
         [[unlikely]] if (i >= chunks_.size())
         {
@@ -349,12 +347,7 @@ int main([[maybe_unused]] const int argc, char** argv)
             {
                 if (i != 0) std::print(", ");
                 const auto& [name, stats] = *sorted_stats[i];
-                std::print(
-                    "{}={:.1f}/{:.1f}/{:.1f}",
-                    name,
-                    stats.Min(),
-                    std::round(stats.Average() * 10.0) / 10.0,
-                    stats.Max());
+                std::print("{}={:.1f}/{:.1f}/{:.1f}", name, stats.Min(), stats.Average(), stats.Max());
             }
             std::println("}}");
         });

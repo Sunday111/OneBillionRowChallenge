@@ -88,7 +88,7 @@ public static void main(String[] args) throws IOException
         },
         agg -> { return new ResultRow(agg.min, (Math.round(agg.sum * 10.0) / 10.0) / agg.count, agg.max); });
 
-    Map<String, ResultRow> measurements = new TreeMap<>(Files.lines(Paths.get(FILE))
+    Map<String, ResultRow> measurements = new TreeMap<>(Files.lines(Paths.get(args[0]))
                                                             .map(l -> new Measurement(l.split(";")))
                                                             .collect(groupingBy(m -> m.station(), collector)));
 
